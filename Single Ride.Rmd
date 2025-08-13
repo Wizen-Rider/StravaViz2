@@ -1,0 +1,378 @@
+---
+title: "Today's Ride"
+author: "DH"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+
+
+```{r}
+# Set working directory to "C:/Data/Projects"
+setwd("C:/Users/hanse_1gnov55/OneDrive/Documents/R/Garmin")  #on Surface 3 Laptop
+#getwd()
+
+```
+```{r}
+
+# Package Installation
+
+#install.packages ("Rtools")
+
+#install.packages("readxl","dplyr", "lubridate", "ggplot2", "readr" , "janitor")
+#install.packages ("zoo")
+#install.packages ("plotly")
+
+```
+
+```{r}
+
+# MASTER SCRIPT: Load FIT file, process data, and plot heart rate over the ride
+
+# 1. Load necessary packages
+library(FITfileR)   # for reading .fit files
+library(dplyr)      # for data manipulation
+library(lubridate)  # for date‐time handling
+library(ggplot2)    # for static plotting
+library(zoo)        # for rolling averages
+library(plotly)     # for interactive plots
+
+# 2. Read your FIT file and extract records
+Ride <- readFitFile("Aug8.fit")
+record_list <- records(Ride)
+Ride.df <- bind_rows(record_list, .id = "definition_id")
+
+# 3. Clean & prepare the data
+Ride.df <- Ride.df %>%
+  # Convert timestamp to POSIXct
+  mutate(timestamp = as.POSIXct(timestamp, origin = "1970-01-01", tz = "UTC")) %>%
+  # Keep only rows with a heart rate measurement
+  filter(!is.na(heart_rate)) %>%
+  arrange(timestamp) %>%
+  # Express time as minutes from start of ride
+  mutate(ride_min = as.numeric(difftime(timestamp, first(timestamp), units = "mins"))) %>%
+  # Filter out anything beyond 157 minutes
+  filter(ride_min <= 157)
+
+# 4. Static line plot: heart rate vs. minutes into ride
+p_static <- ggplot(Ride.df, aes(x = ride_min, y = heart_rate)) +
+  geom_line(color = "steelblue", size = 1) +
+  labs(
+    title = "Heart Rate Over Course of Ride of 8 Aug 25",
+    x     = "Minutes into Ride",
+    y     = "Heart Rate (bpm)"
+  ) +
+  theme_minimal()
+
+print(p_static)
+
+
+
+```
+```{r}
+library(dplyr)
+
+# build Ride.hrz and format intervals
+Ride.hrz <- Ride.df |>
+  arrange(timestamp) |>
+  mutate(
+    # 1) seconds until next timestamp (last row → NA → 0)
+    time_diff_s = as.numeric(difftime(lead(timestamp), timestamp, units = "secs")),
+    time_diff_s = ifelse(is.na(time_diff_s), 0, time_diff_s),
+
+    # 2) recode heart rate into zones
+    hrz = case_when(
+      heart_rate <= 117 ~ "1 Recovery",
+      heart_rate <= 128 ~ "2 Aerobic",
+      heart_rate <= 135 ~ "3 Tempo",
+      heart_rate <= 144 ~ "4 Threshold",
+      heart_rate <= 148 ~ "5A Super Threshold",
+      heart_rate >= 149 ~ "5B Anaerobic"
+    ),
+
+    # 3) format each interval as MM:SS
+    interval_mmss = sprintf(
+      "%02d:%02d",
+      floor(time_diff_s / 60),
+      round(time_diff_s %% 60)
+    )
+  )
+
+# summarize by HR zone
+zone_summary <- Ride.hrz |>
+  group_by(hrz) |>
+  summarise(
+    total_sec  = sum(time_diff_s),
+    total_mmss = sprintf(
+      "%02d:%02d",
+      floor(total_sec / 60),
+      round(total_sec %% 60)
+    )
+  ) |>
+  arrange(hrz)
+
+print(zone_summary)
+
+print(zone_summary)
+
+
+```
+
+```{r}
+
+library(dplyr)
+library(lubridate)
+
+Ride.hrz <- Ride.df %>%
+  arrange(timestamp) %>%
+  mutate(
+    time_diff_s    = as.numeric(difftime(lead(timestamp), timestamp, units = "secs")),
+    time_diff_s    = ifelse(is.na(time_diff_s), 0, time_diff_s),
+    hrz            = case_when(
+                       heart_rate <= 117 ~ "1 Recovery",
+                       heart_rate <= 128 ~ "2 Aerobic",
+                       heart_rate <= 135 ~ "3 Tempo",
+                       heart_rate <= 144 ~ "4 Threshold",
+                       heart_rate <= 148 ~ "5A Super Threshold",
+                       heart_rate >= 149 ~ "5B Anaerobic"
+                     ),
+    interval_period = seconds_to_period(time_diff_s),
+    # extract minutes & seconds from the Period
+    interval_mmss   = sprintf(
+                        "%02d:%02d",
+                        minute(interval_period),
+                        second(interval_period)
+                     )
+  )
+
+# Summarize by zone
+zone_summary <- Ride.hrz %>%
+  group_by(hrz) %>%
+  summarise(
+    total_sec   = sum(time_diff_s),
+    total_period = seconds_to_period(total_sec),
+    total_mmss  = sprintf(
+                     "%02d:%02d",
+                     minute(total_period),
+                     second(total_period)
+                   ),
+    .groups = "drop"
+  ) %>%
+  arrange(hrz)
+
+print(zone_summary)
+
+library(dplyr)
+
+zone_speed <- Ride.hrz %>%
+  group_by(hrz) %>%
+  summarise(
+    w_avg_mph = weighted.mean(enhanced_speed * 2.23694, w = time_diff_s),
+    avg_mph = mean (enhanced_speed * 2.23694),
+    .groups = "drop"
+  ) %>%
+  arrange(hrz)
+
+print(zone_speed)
+
+
+
+```
+
+
+
+
+
+```{r}
+
+# FOR TRAIL RIDES: Read .fit, assign HR zones, split outbound/return by geography, offset return, and plot colored route
+
+library(FITfileR)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+
+# 1. Load and prepare data
+route_df <- readFitFile("Aug8.fit") %>% 
+  records() %>% 
+  bind_rows(.id = "definition_id") %>%
+  mutate(
+    timestamp    = as.POSIXct(timestamp, origin = "1970-01-01", tz = "UTC"),
+    position_lat = as.numeric(position_lat),
+    position_long= as.numeric(position_long),
+    hrz = case_when(
+      heart_rate <= 117 ~ "1 Recovery",
+      heart_rate <= 128 ~ "2 Aerobic",
+      heart_rate <= 135 ~ "3 Tempo",
+      heart_rate <= 144 ~ "4 Threshold",
+      heart_rate <= 148 ~ "5A Super Threshold",
+      heart_rate >= 149 ~ "5B Anaerobic"
+    )
+  ) %>%
+  filter(!is.na(position_lat), !is.na(position_long)) %>%
+  arrange(timestamp)
+
+# 2. Find the turnaround point by minimum latitude
+turn_idx <- which.min(route_df$position_lat)
+
+# 3. Label outbound vs. return and nudge return east
+offset <- 0.005   # ~15 m eastward; tweak as needed
+route_df <- route_df %>%
+  mutate(
+    segment   = ifelse(row_number() <= turn_idx, "Outbound", "Return"),
+    lon_adj   = position_long + ifelse(segment == "Return", offset, 0)
+  )
+
+# 4. HR-zone palette
+hrz_colors <- c(
+  "1 Recovery"         = "grey",
+  "2 Aerobic"          = "#1f78b4",
+  "3 Tempo"            = "#33a02c",
+  "4 Threshold"        = "orange",
+  "5A Super Threshold" = "#e31a1c",
+  "5B Anaerobic"       = "purple"
+)
+
+# 5. Plot one continuous path, colored by HR zone, with return offset
+ggplot(route_df, aes(x = lon_adj, y = position_lat, color = hrz, group = 1)) +
+  geom_path(size = 1.0, lineend = "round") +
+  scale_color_manual(values = hrz_colors) +
+  coord_quickmap() +
+  labs(
+    title    = "Out-and-Back Ride Out of Xenia 8 Aug 25",
+    subtitle = "Turnaround at 20 Miles; Return with T, J and R",
+    x        = "Longitude",
+    y        = "Latitude",
+    color    = "HR Zone"
+  ) +
+  theme_minimal()
+
+
+```
+
+
+```{r}
+
+# FOR OTHER ROUTES: Read .fit, assign HR zones, and plot colored route
+
+library(FITfileR)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+
+# 1. Load and prepare data
+route_df <- readFitFile("Aug10.fit") %>% 
+  records() %>% 
+  bind_rows(.id = "definition_id") %>%
+  mutate(
+    timestamp    = as.POSIXct(timestamp, origin = "1970-01-01", tz = "UTC"),
+    position_lat = as.numeric(position_lat),
+    position_long= as.numeric(position_long),
+    hrz = case_when(
+      heart_rate <= 117 ~ "1 Recovery",
+      heart_rate <= 128 ~ "2 Aerobic",
+      heart_rate <= 135 ~ "3 Tempo",
+      heart_rate <= 144 ~ "4 Threshold",
+      heart_rate <= 148 ~ "5A Super Threshold",
+      heart_rate >= 149 ~ "5B Anaerobic"
+    )
+  ) %>%
+  filter(!is.na(position_lat), !is.na(position_long)) %>%
+  arrange(timestamp)
+
+
+# 4. HR-zone palette
+hrz_colors <- c(
+  "1 Recovery"         = "grey",
+  "2 Aerobic"          = "#1f78b4",
+  "3 Tempo"            = "#33a02c",
+  "4 Threshold"        = "orange",
+  "5A Super Threshold" = "#e31a1c",
+  "5B Anaerobic"       = "purple"
+)
+
+# 5. Plot one continuous path, colored by HR zone, with return offset
+ggplot(route_df, aes(x = position_long, y = position_lat, color = hrz, group = 1)) +
+  geom_path(size = 1.5, lineend = "round") +
+  scale_color_manual(values = hrz_colors) +
+  coord_quickmap() +
+  labs(
+    title    = "HRZ's for Church Ride of 10 Aug 25",
+    subtitle = "71 F; Wind out of NE",
+    x        = "Longitude",
+    y        = "Latitude",
+    color    = "HR Zone"
+  ) +
+  theme_minimal()
+
+
+```
+
+```{r}
+
+# FOR OTHER ROUTES: Read .fit, assign HR zones, and plot colored route
+
+library(FITfileR)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+
+# 1. Load and prepare data
+route_df <- readFitFile("Aug12.fit") %>% 
+  records() %>% 
+  bind_rows(.id = "definition_id") %>%
+  mutate(
+    timestamp    = as.POSIXct(timestamp, origin = "1970-01-01", tz = "UTC"),
+    position_lat = as.numeric(position_lat),
+    position_long= as.numeric(position_long),
+    hrz = case_when(
+      heart_rate <= 117 ~ "1 Recovery",
+      heart_rate <= 128 ~ "2 Aerobic",
+      heart_rate <= 135 ~ "3 Tempo",
+      heart_rate <= 144 ~ "4 Threshold",
+      heart_rate <= 148 ~ "5A Super Threshold",
+      heart_rate >= 149 ~ "5B Anaerobic"
+    )
+  ) %>%
+  filter(!is.na(position_lat), !is.na(position_long)) %>%
+  arrange(timestamp)
+
+
+# 4. HR-zone palette
+hrz_colors <- c(
+  "1 Recovery"         = "grey",
+  "2 Aerobic"          = "#1f78b4",
+  "3 Tempo"            = "#33a02c",
+  "4 Threshold"        = "orange",
+  "5A Super Threshold" = "#e31a1c",
+  "5B Anaerobic"       = "purple"
+)
+
+# 5. Plot one continuous path, colored by HR zone, with return offset
+ggplot(route_df, aes(x = position_long, y = position_lat, color = hrz, group = 1)) +
+  geom_path(size = 1.5, lineend = "round") +
+  scale_color_manual(values = hrz_colors) +
+  coord_quickmap() +
+  labs(
+    title    = "HRZ's for Urban Ride of 12 Aug 25",
+    subtitle = "72 F; Wind ENE at 2 mph",
+    x        = "Longitude",
+    y        = "Latitude",
+    color    = "HR Zone"
+  ) +
+  theme_minimal()
+
+
+```
+
+
+```
